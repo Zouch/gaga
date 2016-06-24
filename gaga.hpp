@@ -21,8 +21,9 @@
  *       TO ENABLE PARALLELISATION
  * *************************************/
 // before including this file,
-// #define OMP if you want OpenMP parallelization
-// #define CLUSTER if you want MPI parallelization
+// #define OMP if you want OpenMP parallelisation
+// #define CLUSTER if you want MPI parralelisation
+// #define CLUSTER if you want MPI parralelisation
 #ifdef CLUSTER
 #include <mpi.h>
 #include <cstring>
@@ -36,6 +37,7 @@
 #include <sys/types.h>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -89,10 +91,10 @@ using std::chrono::system_clock;
 // dna, fitnesses and behavior footprints (for novelty)
 // 2 - the main GA class template
 
-// About parallelization :
+// About parallelisation :
 // before including this file,
-// #define OMP if you want OpenMP parallelization
-// #define CLUSTER if you want MPI parallelization
+// #define OMP if you want OpenMP parallelisation
+// #define CLUSTER if you want MPI parallelisation
 
 /*****************************************************************************
  *                         INDIVIDUAL CLASS
@@ -176,21 +178,8 @@ template <typename DNA> struct Individual {
 // ga.setPopSize(400);
 // return ga.start();
 
-<<<<<<< b29fd4e489fdec8c39d66a93346a0a11877f28dc
 enum class SelectionMethod { paretoTournament, randomObjTournament };
 template <typename DNA> class GA {
-=======
-struct Greater
-{
-    bool operator()(double a, double b) const
-    {
-        return a > b;
-    }
-};
-
-enum class SelectionMethod { paretoTournament, randomObjTournament, paretoDistanceTournament };
-template <typename DNA, typename IsBetterOp = Greater> class GA {
->>>>>>> pareto distance
  protected:
 	/*********************************************************************************
 	 *                            MAIN GA SETTINGS
@@ -215,7 +204,7 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 	bool evaluateAllIndividuals = false;  // force evaluation of every individual
 	bool doSaveParetoFront = false;       // save the pareto front
 	bool doSaveGenStats = true;           // save generations stats to csv file
-	bool doSaveIndStats = true;          // save individuals stats to csv file
+	bool doSaveIndStats = false;          // save individuals stats to csv file
 	SelectionMethod selecMethod = SelectionMethod::paretoTournament;
 
 	/********************************************************************************
@@ -258,10 +247,8 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 		selecMethod = sm;
 		switch (sm) {
 			case SelectionMethod::paretoTournament:
-            case SelectionMethod::paretoDistanceTournament:
 				selection = [this]() { return paretoTournament(); };
 				break;
-
 			case SelectionMethod::randomObjTournament:
 			default:
 				selection = [this]() { return randomObjTournament(); };
@@ -538,23 +525,9 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 	}
 
 	bool paretoDominates(const Individual<DNA> &a, const Individual<DNA> &b) const {
-        if (selecMethod == SelectionMethod::paretoTournament)
-        {
-            for (auto &o : a.fitnesses)
-                if (!isBetter(o.second, b.fitnesses.at(o.first))) return false;
-            return true;
-        }
-        else // paretoDistance
-        {
-            // Compute distance to 0 for a and b
-            double distA = 0.0;
-            double distB = 0.0;
-
-            for (auto& o : a.fitnesses) distA += (o.second * o.second);
-            for (auto& o : b.fitnesses) distB += (o.second * o.second);
-
-            return isBetter(distA, distB);
-        }
+		for (auto &o : a.fitnesses)
+			if (!isBetter(o.second, b.fitnesses.at(o.first))) return false;
+		return true;
 	}
 
 	vector<Individual<DNA> *> getParetoFront(
@@ -592,7 +565,7 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 		auto pf = getParetoFront(participants);
 		assert(pf.size() > 0);
 		std::uniform_int_distribution<size_t> dpf(0, pf.size() - 1);
-        return pf[dpf(globalRand)];
+		return pf[dpf(globalRand)];
 	}
 
 	Individual<DNA> *randomObjTournament() {
@@ -637,7 +610,6 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 			cerr << "getElites : nbObj = " << obj.size() << " n = " << n << endl;
 		}
 		unordered_map<string, vector<Individual<DNA>>> elites;
-<<<<<<< b29fd4e489fdec8c39d66a93346a0a11877f28dc
 		for (auto &o : obj) {
 			elites[o] = vector<Individual<DNA>>();
 			elites[o].push_back(popVec[0]);
@@ -657,44 +629,6 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 				}
 			}
 		}
-=======
-
-        if (selecMethod != SelectionMethod::paretoDistanceTournament)
-        {
-            for (auto &o : obj) {
-                elites[o] = vector<Individual<DNA>>();
-                elites[o].push_back(population[0]);
-                size_t worst = 0;
-                for (size_t i = 1; i < n && i < population.size(); ++i) {
-                    elites[o].push_back(population[i]);
-                    if (isBetter(elites[o][worst].fitnesses.at(o), population[i].fitnesses.at(o)))
-                        worst = i;
-                }
-                for (size_t i = n; i < population.size(); ++i) {
-                    if (isBetter(population[i].fitnesses.at(o), elites[o][worst].fitnesses.at(o))) {
-                        elites[o][worst] = population[i];
-                        for (size_t j = 0; j < n; ++j) {
-                            if (isBetter(elites[o][worst].fitnesses.at(o), elites[o][j].fitnesses.at(o)))
-                                worst = j;
-                        }
-                    }
-                }
-            }
-        }
-        else
-        {
-            std::vector<Individual<DNA>> el;
-            for (const auto& p : population)
-            {
-                el.push_back(p);
-            }
-
-            std::sort(el.begin(), el.end(), [&](const Individual<DNA>& a, const Individual<DNA>& b) { return paretoDominates(a, b); });
-            el.resize(n);
-            elites["ParetoFront"] = el;
-        }
-
->>>>>>> pareto distance
 		return elites;
 	}
 
@@ -831,8 +765,6 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 		switch (sm) {
 			case SelectionMethod::paretoTournament:
 				return "pareto tournament";
-            case SelectionMethod::paretoDistanceTournament:
-                return "pareto distance tournament";
 			case SelectionMethod::randomObjTournament:
 				return "random objective tournament";
 		}
@@ -869,17 +801,17 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 			std::cout << "  ▹ novelty is " << RED << "disabled" << NORMAL << std::endl;
 		}
 #ifdef CLUSTER
-		std::cout << "  ▹ MPI parallelization is " << GREEN << "enabled" << NORMAL
+		std::cout << "  ▹ MPI parallelisation is " << GREEN << "enabled" << NORMAL
 		          << std::endl;
 #else
-		std::cout << "  ▹ MPI parallelization is " << RED << "disabled" << NORMAL
+		std::cout << "  ▹ MPI parallelisation is " << RED << "disabled" << NORMAL
 		          << std::endl;
 #endif
 #ifdef OMP
-		std::cout << "  ▹ OpenMP parallelization is " << GREEN << "enabled" << NORMAL
+		std::cout << "  ▹ OpenMP parallelisation is " << GREEN << "enabled" << NORMAL
 		          << std::endl;
 #else
-		std::cout << "  ▹ OpenMP parallelization is " << RED << "disabled" << NORMAL
+		std::cout << "  ▹ OpenMP parallelisation is " << RED << "disabled" << NORMAL
 		          << std::endl;
 #endif
 		std::cout << GREY;
@@ -902,17 +834,17 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 		}
 		for (const auto &ind : population) {
 			indTotalTime += ind.evalTime;
-            for (const auto &o : ind.fitnesses) {
-                currentGenStats[o.first].at("avg") +=
-                        (o.second / static_cast<double>(population.size()));
-                if (isBetter(o.second, currentGenStats[o.first].at("best")))
-                        currentGenStats[o.first].at("best") = o.second;
-                if (!isBetter(o.second, currentGenStats[o.first].at("worst")))
-                    currentGenStats[o.first].at("worst") = o.second;
-            }
-            if (ind.evalTime > maxTime) maxTime = ind.evalTime;
-            if (!ind.wasAlreadyEvaluated) ++nEvals;
-        }
+			for (const auto &o : ind.fitnesses) {
+				currentGenStats[o.first].at("avg") +=
+				    (o.second / static_cast<double>(population.size()));
+				if (isBetter(o.second, currentGenStats[o.first].at("best")))
+					currentGenStats[o.first].at("best") = o.second;
+				if (!isBetter(o.second, currentGenStats[o.first].at("worst")))
+					currentGenStats[o.first].at("worst") = o.second;
+			}
+			if (ind.evalTime > maxTime) maxTime = ind.evalTime;
+			if (!ind.wasAlreadyEvaluated) ++nEvals;
+		}
 		currentGenStats["global"]["indTotalTime"] = indTotalTime;
 		currentGenStats["global"]["maxTime"] = maxTime;
 		currentGenStats["global"]["nEvals"] = nEvals;
@@ -1065,7 +997,6 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 		if (verbosity >= 3) {
 			std::cout << "created directory " << baseName.str() << std::endl;
 		}
-<<<<<<< b29fd4e489fdec8c39d66a93346a0a11877f28dc
 
 		int id = 0;
 		for (const auto &ind : pfront) {
@@ -1079,34 +1010,6 @@ template <typename DNA, typename IsBetterOp = Greater> class GA {
 			std::ofstream fs(filename.str());
 			if (!fs) {
 				std::cerr << "Cannot open the output file.\n";
-=======
-		for (auto &e : elites) {
-			int id = 0;
-			for (auto &i : e.second) {
-				std::stringstream fileName;
-                double note;
-                if (selecMethod != SelectionMethod::paretoDistanceTournament)
-                {
-                    note = i.fitnesses.at(e.first);
-                }
-                else
-                {
-                    note = 0.0;
-                    for (auto fit : i.fitnesses)
-                    {
-                        note += (fit.second * fit.second);
-                    }
-                }
-
-                fileName << baseName.str() << "/" << e.first << "_" << note << "_" << id++ << ".dna";
-
-				std::ofstream fs(fileName.str());
-				if (!fs) {
-					cerr << "Cannot open the output file." << endl;
-				}
-				fs << i.dna.toJSON();
-				fs.close();
->>>>>>> pareto distance
 			}
 			fs << ind->dna.serialize();
 			fs.close();
