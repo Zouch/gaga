@@ -386,7 +386,7 @@ template <typename DNA> class GA {
 					}
 				}
 				if (doSaveGenStats) saveGenStats();
-				if (doSaveIndStats) saveIndStats_OneLinePerGen();
+				if (doSaveIndStats) saveIndStats();
 
 				prepareNextPop();
 				auto tnp1 = high_resolution_clock::now();
@@ -1051,18 +1051,47 @@ template <typename DNA> class GA {
 		std::stringstream csv;
 		std::stringstream fileName;
 		fileName << folder << "/ind_stats.csv";
+        
 		static bool indStatsWritten = false;
+        
 		if (!indStatsWritten) {
 			csv << "generation,idInd,";
 			for (auto &o : population[0].fitnesses) csv << o.first << ",";
-			csv << "time" << std::endl;
+			csv << "isOnParetoFront,time" << std::endl;
 			indStatsWritten = true;
 		}
+
+        std::vector<int> isOnParetoFront(population.size(), false);
+        if (selecMethod == SelectionMethod::paretoTournament)
+        {
+            std::vector<Individual<DNA>*> pop;            
+			for (auto &p : population) {
+				pop.push_back(&p);
+			}
+
+			auto front = getParetoFront(pop);
+
+			for (size_t i = 0; i < pop.size(); ++i) {
+				Individual<DNA> *ind0 = pop[i];
+				int found = 0;
+
+				for (size_t j = 0; !found && (j < front.size()); ++j) {
+					Individual<DNA> *ind1 = front[j];
+
+					if (ind1 == ind0) {
+						found = 1;
+					}
+				}
+
+				isOnParetoFront[i] = found;
+			}
+        }           
+        
 		for (size_t i = 0; i < population.size(); ++i) {
 			const auto &p = population[i];
 			csv << currentGeneration << "," << i << ",";
 			for (auto &o : p.fitnesses) csv << o.second << ",";
-			csv << p.evalTime << std::endl;
+			csv << isOnParetoFront[i] << "," << p.evalTime << std::endl;
 		}
 		std::ofstream fs;
 		fs.open(fileName.str(), std::fstream::out | std::fstream::app);
