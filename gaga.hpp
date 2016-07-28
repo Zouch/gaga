@@ -185,7 +185,7 @@ template <typename DNA> class GA {
 	 *                            MAIN GA SETTINGS
 	 ********************************************************************************/
 	bool novelty = false;              // enable novelty
-	unsigned int verbosity = 2;        // 0 = silent; 1 = generations stats;
+	unsigned int verbosity = 2;        // 0 = silent; 1 = ions stats;
 	                                   // 2 = individuals stats; 3 = everything
 	size_t popSize = 500;              // nb of individuals in the population
 	size_t nbElites = 1;               // nb of elites to keep accross generations
@@ -594,6 +594,25 @@ template <typename DNA> class GA {
 		return champion;
 	}
 
+    vector<Individual<DNA>> getLastParetoFront()
+    {
+        vector<Individual<DNA>*> pop;
+        vector<Individual<DNA>> result;
+        
+        for (auto &p : lastGen) {
+            pop.push_back(&p);
+        }
+        
+        auto front = getParetoFront(pop);
+
+        for (auto& p : front)
+        {
+            result.push_back(*p);
+        }
+
+        return result;
+    }
+    
 	unordered_map<string, vector<Individual<DNA>>> getElites(size_t n) {
 		vector<string> obj;
 		for (auto &o : population[0].fitnesses) obj.push_back(o.first);
