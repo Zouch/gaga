@@ -1,3 +1,5 @@
+#define OMP
+
 #include "../gaga.hpp"
 #include "../include/json.hpp"
 
@@ -83,22 +85,25 @@ struct TestDNA
 int main(int argc, char** argv)
 {
     GAGA::GA<TestDNA> ga(argc, argv);
-    ga.setVerbosity(0);
+    ga.setSaveFolder("evos");
+    ga.setVerbosity(1);
     ga.setSelectionMethod(GAGA::SelectionMethod::nsga2Tournament);
-    ga.setIsBetterMethod([](auto a, auto b) { return a <= b; });
+    ga.setIsBetterMethod([](auto a, auto b) { return a < b; });
     ga.setEvaluator([](auto& i)
                     {
                         double f0 = i.dna.v0;
                         double g = 1 + 9.0 * i.dna.v1;
                         double f1 = g * (1 - std::sqrt(f1 / g));
 
-                        i.fitnesses["f0"] = i.dna.v0;
-                        i.fitnesses["f1"] = i.dna.v1;
+                        //i.fitnesses["f0"] = i.dna.v0;
+                        //i.fitnesses["f1"] = i.dna.v1;
+                        i.fitnesses["f0"] = f0;
+                        i.fitnesses["f1"] = f1;
                     });
 
-    ga.setPopSize(50);
+    ga.setPopSize(500);
     ga.initPopulation([]() { return TestDNA::random(); });
-    ga.step(10);
+    ga.step(1000);
 
     return 0;
 }

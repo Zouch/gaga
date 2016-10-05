@@ -49,6 +49,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <limits>  // std::numeric_limits<double>::infinity
 #include "include/json.hpp"
 
 #define PURPLE "\033[35m"
@@ -120,6 +121,7 @@ template <typename DNA> struct Individual {
     std::vector<Individual*>    sp;
     int                         np;
     int                         paretoRank;
+    double                      crowdingDistance;
 
     Individual() {}
     explicit Individual(const DNA &d) : dna(d) {}
@@ -348,33 +350,12 @@ template <typename DNA> class GA {
             if (verbosity >= 1) printStart();
         }
         for (int nbg = 0; nbg < nbGeneration; ++nbg) {
+
             newGenerationFunction();
+
             auto tg0 = high_resolution_clock::now();
-#ifdef CLUSTER
-            MPI_distributePopulation();
-#endif
-#ifdef OMP
-#pragma omp parallel for schedule(dynamic, 1)
-#endif
-            for (size_t i = 0; i < population.size(); ++i) {
-                if (evaluateAllIndividuals || !population[i].evaluated) {
-                    auto t0 = high_resolution_clock::now();
-                    population[i].dna.reset();
-                    evaluator(population[i]);
-                    auto t1 = high_resolution_clock::now();
-                    population[i].evaluated = true;
-                    double indTime = std::chrono::duration<double>(t1 - t0).count();
-                    population[i].evalTime = indTime;
-                    population[i].wasAlreadyEvaluated = false;
-                } else {
-                    population[i].evalTime = 0.0;
-                    population[i].wasAlreadyEvaluated = true;
-                }
-                if (verbosity >= 2) printIndividualStats(population[i]);
-            }
-#ifdef CLUSTER
-            MPI_receivePopulation();
-#endif
+            evaluatePopulation();
+
             if (procId == 0) {
                 if (population.size() != popSize)
                     throw std::invalid_argument("Population doesn't match the popSize param");
@@ -415,7 +396,37 @@ template <typename DNA> class GA {
 #endif
     }
 
-// MPI specifics
+    void evaluatePopulation()
+    {
+#ifdef CLUSTER
+        MPI_distributePopulation();
+#endif
+#ifdef OMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+        for (size_t i = 0; i < population.size(); ++i) {
+            if (evaluateAllIndividuals || !population[i].evaluated) {
+                auto t0 = high_resolution_clock::now();
+                population[i].dna.reset();
+                evaluator(population[i]);
+                auto t1 = high_resolution_clock::now();
+                population[i].evaluated = true;
+                double indTime = std::chrono::duration<double>(t1 - t0).count();
+                population[i].evalTime = indTime;
+                population[i].wasAlreadyEvaluated = false;
+            } else {
+                population[i].evalTime = 0.0;
+                population[i].wasAlreadyEvaluated = true;
+            }
+            if (verbosity >= 2) printIndividualStats(population[i]);
+        }
+#ifdef CLUSTER
+        MPI_receivePopulation();
+#endif
+
+    }
+
+    // MPI specifics
 #ifdef CLUSTER
     void MPI_distributePopulation() {
         if (procId == 0) {
@@ -469,7 +480,7 @@ template <typename DNA> class GA {
                 MPI_Get_count(&status, MPI_CHAR, &strLength);
                 char *popChar = new char[strLength + 1];
                 MPI_Recv(popChar, strLength + 1, MPI_BYTE, source, 0, MPI_COMM_WORLD,
-                         MPI_STATUS_IGNORE);
+                        MPI_STATUS_IGNORE);
                 // and we dejsonize!
                 auto o = json::parse(popChar);
                 vector<Individual<DNA>> batch = Individual<DNA>::loadPopFromJSON(o);
@@ -477,8 +488,8 @@ template <typename DNA> class GA {
                 delete popChar;
                 if (verbosity >= 3) {
                     cout << endl
-                         << "Proc " << procId << " : reception of " << batch.size()
-                         << " treated individuals from proc " << source << endl;
+                        << "Proc " << procId << " : reception of " << batch.size()
+                        << " treated individuals from proc " << source << endl;
                 }
             }
         }
@@ -565,7 +576,7 @@ template <typename DNA> class GA {
     }
 
     vector<Individual<DNA> *> getParetoFront(
-        const std::vector<Individual<DNA> *> &ind) const {
+            const std::vector<Individual<DNA> *> &ind) const {
         // naive algorithm. Should be ok for small ind.size()
         vector<Individual<DNA> *> pareto;
         for (size_t i = 0; i < ind.size(); ++i) {
@@ -615,7 +626,7 @@ template <typename DNA> class GA {
             obj = champion->fitnesses.begin()->first;
         } else {
             std::uniform_int_distribution<int> dObj(
-                0, static_cast<int>(champion->fitnesses.size()) - 1);
+                    0, static_cast<int>(champion->fitnesses.size()) - 1);
             auto it = champion->fitnesses.begin();
             std::advance(it, dObj(globalRand));
             obj = it->first;
@@ -689,42 +700,109 @@ template <typename DNA> class GA {
             }
         } while (placedIndivs != popSize);
 
-        for (size_t i = 0; i < paretoFronts.size(); ++i)
+        // Get all fitness names
+        std::vector<std::string> fitnessNames;
+        for (auto f : paretoFronts[0][0]->fitnesses)
         {
-            std::string filename = "pareto_" + std::to_string(currentGeneration) + "_" + std::to_string(i) + ".dat";
-            std::ofstream file(filename);
+            fitnessNames.push_back(f.first);
+        }
 
-            for (auto ind : paretoFronts[i])
+        // Compute crowding distances
+        for (auto& f : paretoFronts)
+        {
+            size_t n = f.size();
+
+            // init distance to 0
+            for (auto ind : f)
             {
-                file << ind->fitnesses["f0"] << " " << ind->fitnesses["f1"] << "\n";
+                ind->crowdingDistance = 0;
             }
 
-            file.close();
+            for (auto fit : fitnessNames)
+            {
+                // Sort population given fitness
+                if (n > 1)
+                {
+                    std::sort(f.begin(), f.end(),
+                            [&](Individual<DNA>* a, Individual<DNA>* b)
+                            {
+                            return isBetter(a->fitnesses[fit], b->fitnesses[fit]);
+                            });
+
+                    f[n-1]->crowdingDistance = std::numeric_limits<double>::infinity();
+                }
+
+                f[0]->crowdingDistance = std::numeric_limits<double>::infinity();
+
+                double fmin = f[0]->fitnesses[fit];
+                double fmax = f[n-1]->fitnesses[fit];
+                double denom = fmax - fmin;
+
+                for (size_t i = 1; i < n - 1; ++i)
+                {
+                    double a = f[i+1]->fitnesses[fit];
+                    double b = f[i-1]->fitnesses[fit];
+                    f[i]->crowdingDistance += (a - b) / denom;
+                }
+            }
         }
+
+        saveNSGA2();
     }
 
     Individual<DNA>* nsga2Tournament()
     {
-        std::uniform_int_distribution<int> d(0, popSize - 1);
-        return &population[d(globalRand)];
+        std::uniform_int_distribution<size_t> dint(0, population.size() - 1);
+
+        Individual<DNA>* p[2];
+
+        p[0] = &population[dint(globalRand)];
+        p[1] = &population[dint(globalRand)];
+
+        int dom = nsga2ParetoDominates(p[0], p[1]);
+
+        if      (p[0]->paretoRank       < p[1]->paretoRank      )   return p[0];
+        else if (p[1]->paretoRank       < p[0]->paretoRank      )   return p[1];
+        else if (p[0]->crowdingDistance > p[1]->crowdingDistance)   return p[0];
+        else if (p[1]->crowdingDistance > p[0]->crowdingDistance)   return p[1];
+
+        // Could not find the better guy, select randomly
+        std::uniform_int_distribution<size_t> ht(0, 1);
+        return p[ht(globalRand)];
     }
 
     vector<Individual<DNA>> getLastParetoFront()
     {
-        vector<Individual<DNA>*> pop;
         vector<Individual<DNA>> result;
-
-        for (auto &p : lastGen) {
-            pop.push_back(&p);
-        }
-
-        auto front = getParetoFront(pop);
-
-        for (auto& p : front)
+        if (selecMethod == SelectionMethod::nsga2Tournament)
         {
-            result.push_back(*p);
-        }
+            auto saved_pop = population;
+            population = lastGen;
 
+            initializeNSGA2();
+
+            for (auto ind : paretoFronts[0])
+            {
+                result.push_back(*ind);
+            }
+
+            population = saved_pop;
+        }
+        else
+        {
+            vector<Individual<DNA>*> pop;
+
+            for (auto &p : lastGen) {
+                pop.push_back(&p);
+            }
+
+            auto front = getParetoFront(pop);
+
+            for (auto& p : front)
+            {
+                result.push_back(*p);
+            }
+        }
         return result;
     }
 
@@ -739,7 +817,7 @@ template <typename DNA> class GA {
         return getElites(obj, n, lastGen);
     }
     unordered_map<string, vector<Individual<DNA>>> getElites(
-        const vector<string> &obj, size_t n, const vector<Individual<DNA>> &popVec) {
+            const vector<string> &obj, size_t n, const vector<Individual<DNA>> &popVec) {
 
 
         if (verbosity >= 3) {
@@ -798,7 +876,7 @@ template <typename DNA> class GA {
     // returns the average distance of a footprint fp to its k nearest neighbours
     // in an archive of footprints
     static double computeAvgDist(size_t K, const vector<Individual<DNA>> &arch,
-                                 const fpType &fp) {
+            const fpType &fp) {
         double avgDist = 0;
         if (arch.size() > 1) {
             size_t k = arch.size() < K ? static_cast<size_t>(arch.size()) : K;
@@ -807,7 +885,7 @@ template <typename DNA> class GA {
             vector<double> knnDist;
             knnDist.reserve(k);
             std::pair<double, size_t> worstKnn = {getFootprintDistance(fp, arch[0].footprint),
-                                                  0};  // maxKnn is the worst among the knn
+                0};  // maxKnn is the worst among the knn
             for (size_t i = 0; i < k; ++i) {
                 knn.push_back(arch[i]);
                 double d = getFootprintDistance(fp, arch[i].footprint);
@@ -844,8 +922,8 @@ template <typename DNA> class GA {
             cout << endl << endl;
             std::stringstream output;
             cout << GREY << " ❯❯  " << YELLOW << "COMPUTING NOVELTY " << NORMAL << " ⤵  "
-                 << endl
-                 << endl;
+                << endl
+                << endl;
         }
         auto savedArchiveSize = archive.size();
         for (auto &ind : population) {
@@ -864,9 +942,9 @@ template <typename DNA> class GA {
             if (verbosity >= 2) {
                 std::stringstream output;
                 output << GREY << " ❯ " << endl
-                       << NORMAL << ind.infos << endl
-                       << " -> Novelty = " << CYAN << avgD << GREY
-                       << (added ? " (added to archive)" : " (too low for archive)") << NORMAL;
+                    << NORMAL << ind.infos << endl
+                    << " -> Novelty = " << CYAN << avgD << GREY
+                    << (added ? " (added to archive)" : " (too low for archive)") << NORMAL;
                 if (verbosity >= 3)
                     output << "Footprint was : " << footprintToString(ind.footprint);
                 output << endl;
@@ -879,15 +957,15 @@ template <typename DNA> class GA {
         if (verbosity >= 2) {
             std::stringstream output;
             output << " Added " << toBeAdded.size() << " new footprints to the archive."
-                   << std::endl
-                   << "New archive size = " << archive.size() << " (was " << savedArchiveSize
-                   << ")." << std::endl;
+                << std::endl
+                << "New archive size = " << archive.size() << " (was " << savedArchiveSize
+                << ")." << std::endl;
             std::cout << output.str() << std::endl;
         }
         if (verbosity >= 2) {
             std::stringstream output;
             output << "Most novel individual (novelty = " << best.second
-                   << "): " << best.first->infos << endl;
+                << "): " << best.first->infos << endl;
             cout << output.str();
         }
     }
@@ -918,7 +996,7 @@ template <typename DNA> class GA {
         for (int i = 0; i < nbCol - 1; ++i) std::cout << "━";
         std::cout << std::endl;
         std::cout << YELLOW << "              ☀     " << NORMAL << " Starting GAGA " << YELLOW
-                  << "    ☀ " << NORMAL;
+            << "    ☀ " << NORMAL;
         std::cout << std::endl;
         std::cout << BLUE << "                      ¯\\_ಠ ᴥ ಠ_/¯" << std::endl << GREY;
         for (int i = 0; i < nbCol - 1; ++i) std::cout << "┄";
@@ -926,9 +1004,9 @@ template <typename DNA> class GA {
         std::cout << "  ▹ population size = " << BLUE << popSize << NORMAL << std::endl;
         std::cout << "  ▹ nb of elites = " << BLUE << nbElites << NORMAL << std::endl;
         std::cout << "  ▹ nb of tournament competitors = " << BLUE << tournamentSize << NORMAL
-                  << std::endl;
+            << std::endl;
         std::cout << "  ▹ selection = " << BLUE << selectMethodToString(selecMethod) << NORMAL
-                  << std::endl;
+            << std::endl;
         std::cout << "  ▹ mutation rate = " << BLUE << mutationProba << NORMAL << std::endl;
         std::cout << "  ▹ crossover rate = " << BLUE << crossoverProba << NORMAL << std::endl;
         std::cout << "  ▹ writing results in " << BLUE << folder << NORMAL << std::endl;
@@ -940,17 +1018,17 @@ template <typename DNA> class GA {
         }
 #ifdef CLUSTER
         std::cout << "  ▹ MPI parallelisation is " << GREEN << "enabled" << NORMAL
-                  << std::endl;
+            << std::endl;
 #else
         std::cout << "  ▹ MPI parallelisation is " << RED << "disabled" << NORMAL
-                  << std::endl;
+            << std::endl;
 #endif
 #ifdef OMP
         std::cout << "  ▹ OpenMP parallelisation is " << GREEN << "enabled" << NORMAL
-                  << std::endl;
+            << std::endl;
 #else
         std::cout << "  ▹ OpenMP parallelisation is " << RED << "disabled" << NORMAL
-                  << std::endl;
+            << std::endl;
 #endif
         std::cout << GREY;
         for (int i = 0; i < nbCol - 1; ++i) std::cout << "━";
@@ -996,11 +1074,11 @@ template <typename DNA> class GA {
         std::ostringstream output;
         const auto &globalStats = genStats[n].at("global");
         output << "Generation " << CYANBOLD << n << NORMAL << " ended in " << BLUE
-               << globalStats.at("genTotalTime") << NORMAL << "s";
+            << globalStats.at("genTotalTime") << NORMAL << "s";
         std::cout << tableCenteredText(l, output.str(), BLUEBOLD NORMAL BLUE NORMAL);
         output = std::ostringstream();
         output << GREYBOLD << "(" << globalStats.at("nEvals") << " evaluations, "
-               << globalStats.at("nObjs") << " objs)" << NORMAL;
+            << globalStats.at("nObjs") << " objs)" << NORMAL;
         std::cout << tableCenteredText(l, output.str(), GREYBOLD NORMAL);
         std::cout << tableSeparation(l);
         double timeRatio = 0;
@@ -1009,20 +1087,20 @@ template <typename DNA> class GA {
         output = std::ostringstream();
         output << "🕝  max: " << BLUE << globalStats.at("maxTime") << NORMAL << "s";
         output << ", 🕝  sum: " << BLUEBOLD << globalStats.at("indTotalTime") << NORMAL
-               << "s (x" << timeRatio << " ratio)";
+            << "s (x" << timeRatio << " ratio)";
         std::cout << tableCenteredText(l, output.str(), CYANBOLD NORMAL BLUE NORMAL "      ");
         std::cout << tableSeparation(l);
         for (const auto &o : genStats[n]) {
             if (o.first != "global") {
                 output = std::ostringstream();
                 output << GREYBOLD << "--◇" << GREENBOLD << std::setw(10) << o.first << GREYBOLD
-                       << " ❯ " << NORMAL << " worst: " << YELLOW << std::setw(12)
-                       << o.second.at("worst") << NORMAL << ", avg: " << YELLOWBOLD
-                       << std::setw(12) << o.second.at("avg") << NORMAL << ", best: " << REDBOLD
-                       << std::setw(12) << o.second.at("best") << NORMAL;
+                    << " ❯ " << NORMAL << " worst: " << YELLOW << std::setw(12)
+                    << o.second.at("worst") << NORMAL << ", avg: " << YELLOWBOLD
+                    << std::setw(12) << o.second.at("avg") << NORMAL << ", best: " << REDBOLD
+                    << std::setw(12) << o.second.at("best") << NORMAL;
                 std::cout << tableText(l, output.str(),
-                                       "    " GREYBOLD GREENBOLD GREYBOLD NORMAL YELLOWBOLD NORMAL
-                                           YELLOW NORMAL GREENBOLD NORMAL);
+                        "    " GREYBOLD GREENBOLD GREYBOLD NORMAL YELLOWBOLD NORMAL
+                        YELLOW NORMAL GREENBOLD NORMAL);
             }
         }
         std::cout << tableFooter(l);
@@ -1033,7 +1111,7 @@ template <typename DNA> class GA {
         output << GREYBOLD << "[" << YELLOW << procId << GREYBOLD << "]-▶ " << NORMAL;
         for (const auto &o : ind.fitnesses)
             output << " " << o.first << ": " << BLUEBOLD << std::setw(12) << o.second << NORMAL
-                   << GREYBOLD << " |" << NORMAL;
+                << GREYBOLD << " |" << NORMAL;
         output << " 🕝 : " << BLUE << ind.evalTime << "s" << NORMAL;
         if (ind.wasAlreadyEvaluated)
             output << GREYBOLD << " (already evaluated)\n" << NORMAL;
@@ -1110,7 +1188,7 @@ template <typename DNA> class GA {
                 for (auto &i : e.second) {
                     std::stringstream fileName;
                     fileName << baseName.str() << "/" << e.first << "_" << i.fitnesses.at(e.first)
-                             << "_" << id++ << ".dna";
+                        << "_" << id++ << ".dna";
                     std::ofstream fs(fileName.str());
                     if (!fs) {
                         cerr << "Cannot open the output file." << endl;
@@ -1119,6 +1197,30 @@ template <typename DNA> class GA {
                     fs.close();
                 }
             }
+        }
+    }
+
+    void saveNSGA2()
+    {
+        // FIXME(charly): This is temporary and sucks hard, needs to be moved to folder
+        std::string paretoFolder = "paretos";
+        if (currentGeneration == 0)
+        {
+            mkdir(paretoFolder.c_str(), 0777);
+            system("exec rm -f paretos/pareto_*");
+        }
+
+        for (size_t i = 0; i < paretoFronts.size(); ++i)
+        {
+            std::string filename = paretoFolder + "/pareto_" + std::to_string(currentGeneration) + "_" + std::to_string(i) + ".dat";
+            std::ofstream file(filename);
+
+            for (auto ind : paretoFronts[i])
+            {
+                file << ind->fitnesses["f0"] << " " << ind->fitnesses["f1"] << "\n";
+            }
+
+            file.close();
         }
     }
 

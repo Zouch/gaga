@@ -19,8 +19,12 @@ def plot_generation(gen):
     if gen in generation_files:
         ax.clear()
 
-        for file in generation_files[gen]:
-            x, y = np.loadtxt(file, delimiter=' ', unpack=True)
+        if False:
+            for file in generation_files[gen]:
+                x, y = np.loadtxt(file, delimiter=' ', unpack=True)
+                ax.plot(x, y, 'o')
+        else:
+            x, y = np.loadtxt(generation_files[gen][0], unpack=True)
             ax.plot(x, y, 'o')
 
         plt.draw()
@@ -39,7 +43,7 @@ def on_key_event(event):
 
 fig.canvas.mpl_connect('key_release_event', on_key_event)
 
-for file in os.listdir('.'):
+for file in os.listdir('paretos'):
     match = re.search(r"pareto_([0-9]+)_([0-9]+).dat", file)
     if match:
         generation = int(match.group(1))
@@ -47,7 +51,7 @@ for file in os.listdir('.'):
 
         if not generation in generation_files:
             generation_files[generation] = []
-        generation_files[generation].append(file)
+        generation_files[generation].append('paretos/' + file)
 
 for gen in generation_files:
     generation_files[gen].sort()
