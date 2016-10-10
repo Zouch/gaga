@@ -22,8 +22,8 @@
  * *************************************/
 // before including this file,
 // #define OMP if you want OpenMP parallelisation
-// #define CLUSTER if you want MPI parralelisation
-// #define CLUSTER if you want MPI parralelisation
+// #define CLUSTER if you want MPI parallelisation
+// #define CLUSTER if you want MPI parallelisation
 #ifdef CLUSTER
 #include <mpi.h>
 #include <cstring>
@@ -32,9 +32,14 @@
 #include <omp.h>
 #endif
 
+#include <experimental/filesystem>
+namespace fs = std::experimental::filesystem::v1;
+
+#if defined(_WIN32)
+#define NO_FANCY_OUTPUT
+#endif
+
 #include <assert.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -52,10 +57,33 @@
 #include <limits>  // std::numeric_limits<double>::infinity
 #include "include/json.hpp"
 
+#if defined (NO_COLORS_OUTPUT)
+#define PURPLE ""
+#define PURPLEBOLD ""
+#define BLUE ""
+#define BLUEBOLD ""
+#define GREY ""
+#define GREYBOLD ""
+#define YELLOW ""
+#define YELLOWBOLD ""
+#define RED ""
+#define REDBOLD ""
+#define CYAN ""
+#define CYANBOLD ""
+#define GREEN ""
+#define GREENBOLD ""
+#define NORMAL ""
+#else
 #define PURPLE "\033[35m"
 #define PURPLEBOLD "\033[1;35m"
+
+#ifdef _WIN32
+#define BLUE "\033[92m"
+#define BLUEBOLD "\033[1;92m"
+#else
 #define BLUE "\033[34m"
 #define BLUEBOLD "\033[1;34m"
+#endif
 #define GREY "\033[30m"
 #define GREYBOLD "\033[1;30m"
 #define YELLOW "\033[33m"
@@ -67,6 +95,7 @@
 #define GREEN "\033[32m"
 #define GREENBOLD "\033[1;32m"
 #define NORMAL "\033[0m"
+#endif
 
 namespace GAGA {
 
@@ -258,7 +287,7 @@ template <typename DNA> class GA {
                 break;
 
             case SelectionMethod::nsga2Tournament:
-                selection = [this]() { return nsga2Tournament(); };
+                // NOTE(charly): Should not be needed
                 break;
 
             case SelectionMethod::randomObjTournament:
@@ -345,47 +374,178 @@ template <typename DNA> class GA {
     // "Vroum vroum"
     void step(int nbGeneration = 1) {
         if (!evaluator) throw std::invalid_argument("No evaluator specified");
-        if (currentGeneration == 0 && procId == 0) {
+
+        if (currentGeneration == 0 && procId == 0)
+        {
             createFolder(folder);
             if (verbosity >= 1) printStart();
         }
-        for (int nbg = 0; nbg < nbGeneration; ++nbg) {
+        
+        if (selecMethod == SelectionMethod::nsga2Tournament)
+        {
+            nsga2Step(nbGeneration);
+        }
+        else
+        {
+            for (int nbg = 0; nbg < nbGeneration; ++nbg) {
 
-            newGenerationFunction();
+                auto tg0 = high_resolution_clock::now();
+                evaluatePopulation(population);
 
+                if (procId == 0) {
+                    if (population.size() != popSize)
+                        throw std::invalid_argument("Population doesn't match the popSize param");
+                    if (novelty) updateNovelty();
+                    auto tg1 = high_resolution_clock::now();
+                    double totalTime = std::chrono::duration<double>(tg1 - tg0).count();
+                    updateStats(totalTime);
+                    auto tnp0 = high_resolution_clock::now();
+                    if (currentGeneration % savePopInterval == 0) {
+                        if (savePopEnabled) savePop();
+                        if (novelty && saveArchiveEnabled) saveArchive();
+                    }
+                    if (verbosity >= 1) printGenStats(currentGeneration);
+                    if (currentGeneration % saveGenInterval == 0) {
+                        if (doSaveParetoFront) {
+                            saveParetoFront();
+                        } else {
+                            saveBests(nbSavedElites);
+                        }
+                    }
+                    if (doSaveGenStats) saveGenStats();
+                    if (doSaveIndStats) saveIndStats();
+
+                    prepareNextPop();
+                    auto tnp1 = high_resolution_clock::now();
+                    double tnp = std::chrono::duration<double>(tnp1 - tnp0).count();
+                    if (verbosity >= 2) {
+                        std::cout << "Time for save + next pop = " << tnp << " s." << std::endl;
+                    }
+                }
+                ++currentGeneration;
+            }
+        }
+    }
+
+    void nsga2Step(int nbGenerations)
+    {
+        // Evaluate parent population only the first time
+        if (currentGeneration == 0)
+        {
+            evaluatePopulation(population);
+        }
+
+        std::uniform_real_distribution<> d(0.0, 1.0);
+        auto rng = std::bind(d, globalRand);
+
+        for (int gen = 0; gen < nbGenerations; ++gen)
+        {
             auto tg0 = high_resolution_clock::now();
-            evaluatePopulation();
+            // Generate new pop Qt
+            std::vector<size_t> a(popSize), b(popSize);
 
-            if (procId == 0) {
-                if (population.size() != popSize)
-                    throw std::invalid_argument("Population doesn't match the popSize param");
+            for (size_t i = 0; i < popSize; ++i) a[i] = b[i] = i;
+            std::shuffle(a.begin(), a.end(), globalRand);
+            std::shuffle(b.begin(), b.end(), globalRand);
+
+            std::vector<Individual<DNA>> child_pop;
+            std::vector<Individual<DNA>> mixed_pop;
+
+            // FIXME(charly): Validate the new population creation
+            for (size_t i = 0; i < popSize; i += 4)
+            {
+                Individual<DNA>* p00 = nsga2Tournament(&population[a[i+0]], &population[a[i+1]]);
+                Individual<DNA>* p01 = nsga2Tournament(&population[a[i+2]], &population[a[i+3]]);
+
+                if (rng() < crossoverProba)
+                {
+                    Individual<DNA> c0, c1;
+                    c0.dna = p00->dna.crossover(p01->dna);
+                    c1.dna = p01->dna.crossover(p00->dna);
+
+                    child_pop.push_back(c0);
+                    child_pop.push_back(c1);
+                }
+                else
+                {
+                    child_pop.push_back(*p00);
+                    child_pop.push_back(*p01);
+                }
+
+                Individual<DNA>* p10 = nsga2Tournament(&population[b[i+0]], &population[b[i+1]]);
+                Individual<DNA>* p11 = nsga2Tournament(&population[b[i+2]], &population[b[i+3]]);
+
+                if (rng() < crossoverProba)
+                {
+                    Individual<DNA> c0, c1;
+                    c0.dna = p10->dna.crossover(p11->dna);
+                    c1.dna = p11->dna.crossover(p10->dna);
+
+                    child_pop.push_back(c0);
+                    child_pop.push_back(c1);
+                }
+                else
+                {
+                    child_pop.push_back(*p10); 
+                    child_pop.push_back(*p11);
+                }
+            }
+
+            assert(child_pop.size() == population.size());
+
+            // Mutate pop Qt 
+            for (auto& indiv : child_pop)
+            {
+                if (rng() < mutationProba)
+                {
+                    indiv.dna.mutate();
+                }
+            }
+
+            // Evaluate Qt
+            evaluatePopulation(child_pop);
+
+            // Merge Pt and Qt -> Rt
+            mixed_pop.clear();
+            mixed_pop.insert(mixed_pop.end(), population.begin(), population.end());
+            mixed_pop.insert(mixed_pop.end(), child_pop.begin(), child_pop.end());
+
+            // Sort Rt (nsga2)
+            nsga2SortPopulation(mixed_pop);
+
+            // Generate P(t+1)
+            std::vector<Individual<DNA>> new_population;
+
+            int front = 0;
+            while (new_population.size() + paretoFronts[front].size() < population.size())
+            {
+                for (auto indiv : paretoFronts[front])
+                {
+                    new_population.push_back(*indiv);
+                }
+
+                ++front;
+            }
+            
+            // Take best individuals of the last front 
+            int indiv_idx = 0;
+            while (new_population.size() < population.size())
+            {
+                new_population.push_back(*paretoFronts[front][indiv_idx]);
+            }
+
+            lastGen = population;
+            population = new_population;
+
+            if (procId == 0)
+            {
                 if (novelty) updateNovelty();
                 auto tg1 = high_resolution_clock::now();
                 double totalTime = std::chrono::duration<double>(tg1 - tg0).count();
                 updateStats(totalTime);
-                auto tnp0 = high_resolution_clock::now();
-                if (currentGeneration % savePopInterval == 0) {
-                    if (savePopEnabled) savePop();
-                    if (novelty && saveArchiveEnabled) saveArchive();
-                }
                 if (verbosity >= 1) printGenStats(currentGeneration);
-                if (currentGeneration % saveGenInterval == 0) {
-                    if (doSaveParetoFront) {
-                        saveParetoFront();
-                    } else {
-                        saveBests(nbSavedElites);
-                    }
-                }
-                if (doSaveGenStats) saveGenStats();
-                if (doSaveIndStats) saveIndStats();
-
-                prepareNextPop();
-                auto tnp1 = high_resolution_clock::now();
-                double tnp = std::chrono::duration<double>(tnp1 - tnp0).count();
-                if (verbosity >= 2) {
-                    std::cout << "Time for save + next pop = " << tnp << " s." << std::endl;
-                }
             }
+
             ++currentGeneration;
         }
     }
@@ -396,48 +556,50 @@ template <typename DNA> class GA {
 #endif
     }
 
-    void evaluatePopulation()
+    void evaluatePopulation(std::vector<Individual<DNA>>& pop)
     {
+        newGenerationFunction();
+
 #ifdef CLUSTER
-        MPI_distributePopulation();
+        MPI_distributePopulation(pop);
 #endif
 #ifdef OMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
-        for (size_t i = 0; i < population.size(); ++i) {
-            if (evaluateAllIndividuals || !population[i].evaluated) {
+        for (size_t i = 0; i < pop.size(); ++i) {
+            if (evaluateAllIndividuals || !pop[i].evaluated) {
                 auto t0 = high_resolution_clock::now();
-                population[i].dna.reset();
-                evaluator(population[i]);
+                pop[i].dna.reset();
+                evaluator(pop[i]);
                 auto t1 = high_resolution_clock::now();
-                population[i].evaluated = true;
+                pop[i].evaluated = true;
                 double indTime = std::chrono::duration<double>(t1 - t0).count();
-                population[i].evalTime = indTime;
-                population[i].wasAlreadyEvaluated = false;
+                pop[i].evalTime = indTime;
+                pop[i].wasAlreadyEvaluated = false;
             } else {
-                population[i].evalTime = 0.0;
-                population[i].wasAlreadyEvaluated = true;
+                pop[i].evalTime = 0.0;
+                pop[i].wasAlreadyEvaluated = true;
             }
-            if (verbosity >= 2) printIndividualStats(population[i]);
+            if (verbosity >= 2) printIndividualStats(pop[i]);
         }
 #ifdef CLUSTER
-        MPI_receivePopulation();
+        MPI_receivePopulation(pop);
 #endif
 
     }
 
     // MPI specifics
 #ifdef CLUSTER
-    void MPI_distributePopulation() {
+    void MPI_distributePopulation(std::vector<Individual<DNA>>& pop) {
         if (procId == 0) {
             // if we're in the master process, we send b(i)atches to the others.
             // master will have the remaining
-            size_t batchSize = population.size() / nbProcs;
+            size_t batchSize = pop.size() / nbProcs;
             for (size_t dest = 1; dest < (size_t)nbProcs; ++dest) {
                 vector<Individual<DNA>> batch;
                 for (size_t ind = 0; ind < batchSize; ++ind) {
-                    batch.push_back(population.back());
-                    population.pop_back();
+                    batch.push_back(pop.back());
+                    pop.pop_back();
                 }
                 string batchStr = Individual<DNA>::popToJSON(batch).dump();
                 std::vector<char> tmp(batchStr.begin(), batchStr.end());
@@ -454,20 +616,20 @@ template <typename DNA> class GA {
             MPI_Recv(popChar, strLength, MPI_BYTE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             // and we dejsonize !
             auto o = json::parse(popChar);
-            population = Individual<DNA>::loadPopFromJSON(o);  // welcome bros!
+            pop = Individual<DNA>::loadPopFromJSON(o);  // welcome bros!
             if (verbosity >= 3) {
                 std::ostringstream buf;
                 buf << endl
                     << "Proc " << PURPLE << procId << NORMAL << " : reception of "
-                    << population.size() << " new individuals !" << endl;
+                    << pop.size() << " new individuals !" << endl;
                 cout << buf.str();
             }
         }
     }
 
-    void MPI_receivePopulation() {
+    void MPI_receivePopulation(std::vector<Individual<DNA>>& pop) {
         if (procId != 0) {  // if slave process we send our population to our mighty leader
-            string batchStr = Individual<DNA>::popToJSON(population).dump();
+            string batchStr = Individual<DNA>::popToJSON(pop).dump();
             std::vector<char> tmp(batchStr.begin(), batchStr.end());
             tmp.push_back('\0');
             MPI_Send(tmp.data(), tmp.size(), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
@@ -484,7 +646,7 @@ template <typename DNA> class GA {
                 // and we dejsonize!
                 auto o = json::parse(popChar);
                 vector<Individual<DNA>> batch = Individual<DNA>::loadPopFromJSON(o);
-                population.insert(population.end(), batch.begin(), batch.end());
+                pop.insert(pop.end(), batch.begin(), batch.end());
                 delete popChar;
                 if (verbosity >= 3) {
                     cout << endl
@@ -508,11 +670,6 @@ template <typename DNA> class GA {
 
         // Save this generation
         lastGen = population;
-
-        if (selecMethod == SelectionMethod::nsga2Tournament)
-        {
-            initializeNSGA2();
-        }
 
         // elitism
         auto elites = getElites(nbElites);
@@ -564,9 +721,9 @@ template <typename DNA> class GA {
             else if (isBetter(fit_b, fit_a))    b_dominates = 1;
         }
 
-        if (a_dominates == b_dominates)         return  0; // No one dominates each other
-        if (a_dominates >  b_dominates)         return  1; // a dominates b
-        if (a_dominates <  b_dominates)         return -1; // b dominates a
+        if (a_dominates >  b_dominates)         return  1;  // a dominates b
+        if (a_dominates <  b_dominates)         return -1;  // b dominates a
+        return 0;                                           // No one dominates the other
     }
 
     bool paretoDominates(const Individual<DNA> &a, const Individual<DNA> &b) const {
@@ -640,7 +797,7 @@ template <typename DNA> class GA {
     }
 
     std::vector<std::vector<Individual<DNA>*>> paretoFronts;
-    void initializeNSGA2()
+    void nsga2SortPopulation(std::vector<Individual<DNA>>& pop)
     {
         paretoFronts.clear();
         std::vector<Individual<DNA>*> currentFront;
@@ -648,16 +805,16 @@ template <typename DNA> class GA {
         int currentRank = 1;
         int placedIndivs = 0;
 
-        for (size_t pid = 0; pid < population.size(); ++pid)
+        for (size_t pid = 0; pid < pop.size(); ++pid)
         {
-            Individual<DNA>* p = &population[pid];
+            Individual<DNA>* p = &pop[pid];
             p->np = 0;
             p->sp.clear();
 
-            for (size_t qid = 0; qid < population.size(); ++qid)
+            for (size_t qid = 0; qid < pop.size(); ++qid)
             {
                 if (pid == qid) continue;
-                Individual<DNA>* q = &population[qid];
+                Individual<DNA>* q = &pop[qid];
 
                 int cmp = nsga2ParetoDominates(p, q);
                 if      (cmp > 0)   p->sp.push_back(q); // p dominates q
@@ -698,7 +855,7 @@ template <typename DNA> class GA {
                     }
                 }
             }
-        } while (placedIndivs != popSize);
+        } while (placedIndivs != pop.size());
 
         // Get all fitness names
         std::vector<std::string> fitnessNames;
@@ -747,28 +904,33 @@ template <typename DNA> class GA {
             }
         }
 
-        saveNSGA2();
+        nsga2SaveFront();
     }
 
+    /*
     Individual<DNA>* nsga2Tournament()
     {
         std::uniform_int_distribution<size_t> dint(0, population.size() - 1);
 
-        Individual<DNA>* p[2];
+        Individual<DNA>* a, b;
 
-        p[0] = &population[dint(globalRand)];
-        p[1] = &population[dint(globalRand)];
+        a = &population[dint(globalRand)];
+        b = &population[dint(globalRand)];
 
-        int dom = nsga2ParetoDominates(p[0], p[1]);
+        return nsga2Tournament(a, b);
+    }
+    */
 
-        if      (p[0]->paretoRank       < p[1]->paretoRank      )   return p[0];
-        else if (p[1]->paretoRank       < p[0]->paretoRank      )   return p[1];
-        else if (p[0]->crowdingDistance > p[1]->crowdingDistance)   return p[0];
-        else if (p[1]->crowdingDistance > p[0]->crowdingDistance)   return p[1];
+    Individual<DNA>* nsga2Tournament(Individual<DNA>* a, Individual<DNA>* b)
+    {
+        if      (a->paretoRank          < b->paretoRank)        return a;
+        else if (b->paretoRank          < a->paretoRank)        return b;
+        else if (a->crowdingDistance    > b->crowdingDistance)  return a;
+        else if (b->crowdingDistance    > a->crowdingDistance)  return b;
 
         // Could not find the better guy, select randomly
         std::uniform_int_distribution<size_t> ht(0, 1);
-        return p[ht(globalRand)];
+        return (ht(globalRand) == 0 ? a : b);
     }
 
     vector<Individual<DNA>> getLastParetoFront()
@@ -983,6 +1145,8 @@ template <typename DNA> class GA {
                 return "pareto tournament";
             case SelectionMethod::randomObjTournament:
                 return "random objective tournament";
+            case SelectionMethod::nsga2Tournament:
+                return "NSGA-II";
         }
         return "???";
     }
@@ -990,6 +1154,7 @@ template <typename DNA> class GA {
     /*********************************************************************************
      *                           STATS, LOGS & PRINTING
      ********************************************************************************/
+#if not defined (NO_FANCY_OUTPUT)
     void printStart() {
         int nbCol = 55;
         std::cout << std::endl << GREY;
@@ -1034,6 +1199,42 @@ template <typename DNA> class GA {
         for (int i = 0; i < nbCol - 1; ++i) std::cout << "━";
         std::cout << NORMAL << std::endl;
     }
+#else
+    void printStart() {
+        int nbCol = 55;
+        printf("Starting GAGA... Infos:\n");
+        printf("    Population size               %s%zu%s\n",     BLUE, popSize, NORMAL);
+        printf("    Nb of elites                  %s%zu%s\n",     BLUE, nbElites, NORMAL);
+        printf("    Nb of tournament competitors  %s%zu%s\n",     BLUE, tournamentSize, NORMAL);
+        printf("    Selection                     %s%s%s\n",      BLUE, selectMethodToString(selecMethod).c_str(), NORMAL);
+        printf("    Mutation rate                 %s%.3f%s\n",    BLUE, mutationProba, NORMAL);
+        printf("    Crossover rate                %s%.3f%s\n",    BLUE, crossoverProba, NORMAL);
+        printf("    Writing results to            %s%s%s\n",      BLUE, folder.c_str(), NORMAL);
+
+        if (novelty)
+        {
+            printf("    Novelty is                    %senabled%s\n",   BLUE, NORMAL);
+            printf("      - KNN size = %s%zu%s\n", BLUE, KNN, NORMAL);
+        }
+        else
+        {
+            printf("    Novelty is                    %sdisabled%s\n",   BLUE, NORMAL);
+        }
+
+#ifdef CLUSTER
+        printf("    MPI parallelisation is        %senabled%s\n", GREEN, NORMAL);
+#else               
+        printf("    MPI parallelisation is        %sdisabled%s\n", RED, NORMAL);
+#endif
+#ifdef OMP
+        printf("    OMP parallelisation is        %senabled%s\n", GREEN, NORMAL);
+#else               
+        printf("    OMP parallelisation is        %sdisabled%s\n, RED, NORMAL);
+#endif
+        printf("\n");
+    }
+#endif
+
     void updateStats(double totalTime) {
         // stats organisations :
         // "global" -> {"genTotalTime", "indTotalTime", "maxTime", "nEvals", "nObjs"}
@@ -1068,6 +1269,7 @@ template <typename DNA> class GA {
         genStats.push_back(currentGenStats);
     }
 
+#if not defined(NO_FANCY_OUTPUT)
     void printGenStats(size_t n) {
         const size_t l = 80;
         std::cout << tableHeader(l);
@@ -1105,6 +1307,30 @@ template <typename DNA> class GA {
         }
         std::cout << tableFooter(l);
     }
+#else
+    void printGenStats(size_t n)
+    {
+        const auto &globalStats = genStats[n].at("global");
+
+        printf("Generation %s%zu%s ended in %s%.4fs%s (%.0f evaluations, %.0f objectives)\n", CYANBOLD, n, NORMAL, BLUE, globalStats.at("genTotalTime"), NORMAL, globalStats.at("nEvals"), globalStats.at("nObjs"));
+
+        double timeRatio = 0.0;
+        if (globalStats.at("genTotalTime") > 0)
+            timeRatio = globalStats.at("indTotalTime") / globalStats.at("genTotalTime");
+
+        printf("    - timings : max %s%.3fs%s, sum %s%.3fs%s (x%.3f ratio)\n", BLUE, globalStats.at("maxTime"), NORMAL, BLUEBOLD, globalStats.at("indTotalTime"), NORMAL, timeRatio);
+        printf("    - fitnesses :\n");
+        
+        for (const auto &o : genStats[n])
+        {
+            if (o.first != "global")
+            {
+                printf("        %s > worst %s%.3f%s, avg %s%.3f%s, best %s%.3f%s\n", o.first.c_str(), YELLOW, o.second.at("worst"), NORMAL, YELLOWBOLD, o.second.at("avg"), NORMAL, RED, o.second.at("best"), NORMAL);
+            }
+        }
+        printf("\n");
+    }
+#endif
 
     void printIndividualStats(const Individual<DNA> &ind) {
         std::ostringstream output;
@@ -1179,7 +1405,7 @@ template <typename DNA> class GA {
             auto elites = getElites(objectives, n, population);
             std::stringstream baseName;
             baseName << folder << "/gen" << currentGeneration;
-            mkdir(baseName.str().c_str(), 0777);
+            fs::create_directory(baseName.str());
             if (verbosity >= 3) {
                 cerr << "created directory " << baseName.str() << endl;
             }
@@ -1200,14 +1426,14 @@ template <typename DNA> class GA {
         }
     }
 
-    void saveNSGA2()
+    void nsga2SaveFront()
     {
         // FIXME(charly): This is temporary and sucks hard, needs to be moved to folder
         std::string paretoFolder = "paretos";
         if (currentGeneration == 0)
         {
-            mkdir(paretoFolder.c_str(), 0777);
-            system("exec rm -f paretos/pareto_*");
+            fs::remove_all(paretoFolder);
+            fs::create_directory(paretoFolder);
         }
 
         for (size_t i = 0; i < paretoFronts.size(); ++i)
@@ -1233,7 +1459,7 @@ template <typename DNA> class GA {
         auto pfront = getParetoFront(pop);
         std::stringstream baseName;
         baseName << folder << "/gen" << currentGeneration;
-        mkdir(baseName.str().c_str(), 0777);
+        fs::create_directory(baseName.str());
         if (verbosity >= 3) {
             std::cout << "created directory " << baseName.str() << std::endl;
         }
@@ -1414,27 +1640,9 @@ template <typename DNA> class GA {
         fs.close();
     }
 
-    int mkpath(char *file_path, mode_t mode) {
-        assert(file_path && *file_path);
-        char *p;
-        for (p = strchr(file_path + 1, '/'); p; p = strchr(p + 1, '/')) {
-            *p = '\0';
-            if (mkdir(file_path, mode) == -1) {
-                if (errno != EEXIST) {
-                    *p = '/';
-                    return -1;
-                }
-            }
-            *p = '/';
-        }
-        return 0;
-    }
     void createFolder(string baseFolder) {
         if (baseFolder.back() != '/') baseFolder += "/";
-        struct stat sb;
-        char bFChar[baseFolder.length() + 1];
-        strcpy(bFChar, baseFolder.c_str());
-        mkpath(bFChar, 0777);
+        fs::create_directory(baseFolder);
         auto now = system_clock::now();
         time_t now_c = system_clock::to_time_t(now);
         struct tm *parts = localtime(&now_c);
@@ -1448,9 +1656,9 @@ template <typename DNA> class GA {
             ftot.str("");
             ftot << baseFolder << fname.str() << cpt;
             cpt++;
-        } while (stat(ftot.str().c_str(), &sb) == 0 && S_ISDIR(sb.st_mode));
+        } while (fs::exists(ftot.str())); //stat(ftot.str().c_str(), &sb) == 0 && S_ISDIR(sb.st_mode));
         folder = ftot.str();
-        mkdir(folder.c_str(), 0777);
+        fs::create_directory(folder);
     }
 
  public:
@@ -1478,7 +1686,7 @@ template <typename DNA> class GA {
         o["generation"] = currentGeneration;
         std::stringstream baseName;
         baseName << folder << "/gen" << currentGeneration;
-        mkdir(baseName.str().c_str(), 0777);
+        fs::create_directory(baseName.str());
         std::stringstream fileName;
         fileName << baseName.str() << "/pop" << currentGeneration << ".pop";
         std::ofstream file;
@@ -1491,7 +1699,7 @@ template <typename DNA> class GA {
         o["evaluator"] = evaluatorName;
         std::stringstream baseName;
         baseName << folder << "/gen" << currentGeneration;
-        mkdir(baseName.str().c_str(), 0777);
+        fs::create_directory(baseName.str());
         std::stringstream fileName;
         fileName << baseName.str() << "/archive" << currentGeneration << ".pop";
         std::ofstream file;

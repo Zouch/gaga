@@ -93,7 +93,7 @@ int main(int argc, char** argv)
                     {
                         double f0 = i.dna.v0;
                         double g = 1 + 9.0 * i.dna.v1;
-                        double f1 = g * (1 - std::sqrt(f1 / g));
+                        double f1 = g * (1 - std::sqrt(f0 / g));
 
                         //i.fitnesses["f0"] = i.dna.v0;
                         //i.fitnesses["f1"] = i.dna.v1;
@@ -101,7 +101,7 @@ int main(int argc, char** argv)
                         i.fitnesses["f1"] = f1;
                     });
 
-    ga.setPopSize(500);
+    ga.setPopSize(200);
     ga.initPopulation([]() { return TestDNA::random(); });
     ga.step(1000);
 
