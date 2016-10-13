@@ -19,7 +19,11 @@ def plot_generation(gen):
     if gen in generation_files:
         ax.clear()
 
-        if False:
+        xs = np.linspace(0, 1, 100);
+        ys = 1 - np.sqrt(xs);
+        ax.plot(xs, ys, 'r-');
+
+        if True:
             for file in generation_files[gen]:
                 x, y = np.loadtxt(file, delimiter=' ', unpack=True)
                 ax.plot(x, y, 'o')

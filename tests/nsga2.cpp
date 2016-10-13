@@ -10,8 +10,8 @@ using IntDistribution  = std::uniform_int_distribution<int>;
 
 static std::random_device   rd;
 static std::mt19937_64      gen(rd());
-static RealDistribution     rdis;
-static IntDistribution      idis;
+static RealDistribution     rdis(0.0, 1.0);
+static IntDistribution      idis(0, 1);
 
 struct TestDNA
 {
@@ -41,6 +41,27 @@ struct TestDNA
         else
         {
             v1 = rdis(gen);
+        }
+    }
+
+    void crossover(const TestDNA& other, TestDNA& child0, TestDNA& child1)
+    {
+        int v = idis(gen);
+        if (v == 0)
+        {
+            child0.v0 = v0;
+            child0.v1 = other.v1;
+
+            child1.v0 = other.v0;
+            child1.v1 = v1;
+        }
+        else
+        {
+            child0.v0 = other.v0;
+            child0.v1 = v1;
+
+            child1.v0 = v0;
+            child1.v1 = other.v1;
         }
     }
 
@@ -87,6 +108,8 @@ int main(int argc, char** argv)
     GAGA::GA<TestDNA> ga(argc, argv);
     ga.setSaveFolder("evos");
     ga.setVerbosity(1);
+    ga.setCrossoverProba(0.3);
+    ga.setMutationProba(0.7);
     ga.setSelectionMethod(GAGA::SelectionMethod::nsga2Tournament);
     ga.setIsBetterMethod([](auto a, auto b) { return a < b; });
     ga.setEvaluator([](auto& i)

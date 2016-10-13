@@ -33,7 +33,7 @@
 #endif
 
 #include <experimental/filesystem>
-namespace fs = std::experimental::filesystem::v1;
+namespace fs = std::experimental::filesystem;
 
 #if defined(_WIN32)
 #define NO_FANCY_OUTPUT
@@ -132,6 +132,7 @@ using std::chrono::system_clock;
 // A valid DNA class must have (see examples folder):
 // DNA mutate()
 // DNA crossover(DNA& other)
+// void crossover(DNA other, DNA& child0, DNA& child1) -> for nsga2
 // static DNA random(int argc, char** argv)
 // json& constructor
 // void reset()
@@ -165,6 +166,10 @@ template <typename DNA> struct Individual {
         if (o.count("alreadyEval")) wasAlreadyEvaluated = o.at("alreadyEval");
         if (o.count("evalTime")) evalTime = o.at("evalTime");
     }
+
+    ~Individual() = default;
+    Individual(const Individual&) = default;
+    Individual& operator=(const Individual&) = default;
 
     // Exports individual to json
     json toJSON() const {
@@ -380,7 +385,7 @@ template <typename DNA> class GA {
             createFolder(folder);
             if (verbosity >= 1) printStart();
         }
-        
+
         if (selecMethod == SelectionMethod::nsga2Tournament)
         {
             nsga2Step(nbGeneration);
@@ -438,7 +443,7 @@ template <typename DNA> class GA {
         std::uniform_real_distribution<> d(0.0, 1.0);
         auto rng = std::bind(d, globalRand);
 
-        for (int gen = 0; gen < nbGenerations; ++gen)
+        for (int nbg = 0; nbg < nbGenerations; ++nbg)
         {
             auto tg0 = high_resolution_clock::now();
             // Generate new pop Qt
@@ -460,8 +465,9 @@ template <typename DNA> class GA {
                 if (rng() < crossoverProba)
                 {
                     Individual<DNA> c0, c1;
-                    c0.dna = p00->dna.crossover(p01->dna);
-                    c1.dna = p01->dna.crossover(p00->dna);
+                    p00->dna.crossover(p01->dna, c0.dna, c1.dna);
+
+                    c0.evaluated = c1.evaluated = false;
 
                     child_pop.push_back(c0);
                     child_pop.push_back(c1);
@@ -478,27 +484,29 @@ template <typename DNA> class GA {
                 if (rng() < crossoverProba)
                 {
                     Individual<DNA> c0, c1;
-                    c0.dna = p10->dna.crossover(p11->dna);
-                    c1.dna = p11->dna.crossover(p10->dna);
+                    p10->dna.crossover(p11->dna, c0.dna, c1.dna);
+
+                    c0.evaluated = c1.evaluated = false;
 
                     child_pop.push_back(c0);
                     child_pop.push_back(c1);
                 }
                 else
                 {
-                    child_pop.push_back(*p10); 
+                    child_pop.push_back(*p10);
                     child_pop.push_back(*p11);
                 }
             }
 
             assert(child_pop.size() == population.size());
 
-            // Mutate pop Qt 
+            // Mutate pop Qt
             for (auto& indiv : child_pop)
             {
                 if (rng() < mutationProba)
                 {
                     indiv.dna.mutate();
+                    indiv.evaluated = false;
                 }
             }
 
@@ -526,8 +534,8 @@ template <typename DNA> class GA {
 
                 ++front;
             }
-            
-            // Take best individuals of the last front 
+
+            // Take best individuals of the last front
             int indiv_idx = 0;
             while (new_population.size() < population.size())
             {
@@ -829,13 +837,10 @@ template <typename DNA> class GA {
             }
         }
 
-        do
+        paretoFronts.push_back(currentFront);
+        while (placedIndivs != pop.size())
         {
             ++currentRank;
-            if (!currentFront.empty())
-            {
-                paretoFronts.push_back(currentFront);
-            }
             lastFront = currentFront;
             currentFront.clear();
 
@@ -855,7 +860,12 @@ template <typename DNA> class GA {
                     }
                 }
             }
-        } while (placedIndivs != pop.size());
+
+            if (!currentFront.empty())
+            {
+                paretoFronts.push_back(currentFront);
+            }
+        }
 
         // Get all fitness names
         std::vector<std::string> fitnessNames;
@@ -904,6 +914,7 @@ template <typename DNA> class GA {
             }
         }
 
+
         nsga2SaveFront();
     }
 
@@ -938,17 +949,12 @@ template <typename DNA> class GA {
         vector<Individual<DNA>> result;
         if (selecMethod == SelectionMethod::nsga2Tournament)
         {
-            auto saved_pop = population;
-            population = lastGen;
-
-            initializeNSGA2();
+            nsga2SortPopulation(lastGen);
 
             for (auto ind : paretoFronts[0])
             {
                 result.push_back(*ind);
             }
-
-            population = saved_pop;
         }
         else
         {
@@ -1223,13 +1229,13 @@ template <typename DNA> class GA {
 
 #ifdef CLUSTER
         printf("    MPI parallelisation is        %senabled%s\n", GREEN, NORMAL);
-#else               
+#else
         printf("    MPI parallelisation is        %sdisabled%s\n", RED, NORMAL);
 #endif
 #ifdef OMP
         printf("    OMP parallelisation is        %senabled%s\n", GREEN, NORMAL);
-#else               
-        printf("    OMP parallelisation is        %sdisabled%s\n, RED, NORMAL);
+#else
+        printf("    OMP parallelisation is        %sdisabled%s\n", RED, NORMAL);
 #endif
         printf("\n");
     }
@@ -1320,7 +1326,7 @@ template <typename DNA> class GA {
 
         printf("    - timings : max %s%.3fs%s, sum %s%.3fs%s (x%.3f ratio)\n", BLUE, globalStats.at("maxTime"), NORMAL, BLUEBOLD, globalStats.at("indTotalTime"), NORMAL, timeRatio);
         printf("    - fitnesses :\n");
-        
+
         for (const auto &o : genStats[n])
         {
             if (o.first != "global")
@@ -1430,9 +1436,14 @@ template <typename DNA> class GA {
     {
         // FIXME(charly): This is temporary and sucks hard, needs to be moved to folder
         std::string paretoFolder = "paretos";
+
         if (currentGeneration == 0)
         {
-            fs::remove_all(paretoFolder);
+            try
+            {
+                fs::remove_all(paretoFolder);
+            }
+            catch(std::exception& e) {}
             fs::create_directory(paretoFolder);
         }
 
